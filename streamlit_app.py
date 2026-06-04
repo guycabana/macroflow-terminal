@@ -9,7 +9,7 @@ st.caption("Live economic data from FRED")
 API_KEY = st.secrets["FRED_API_KEY"]
 BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
-
+@st.cache_data(ttl=3600)   # remember each result for 1 hour
 def get_series(series_id, start):
     params = {
         "series_id": series_id,
