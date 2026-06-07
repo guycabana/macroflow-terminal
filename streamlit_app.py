@@ -184,7 +184,8 @@ elif st.button("Generate brief"):
         market_lines.append(f"Net liquidity: ${latest_m/1e6:,.2f}T (30d {delta_b:+,.0f}B)")
     with st.spinner("Narrating the facts…"):
         try:
-            st.markdown(generate_brief(anthropic_key, flags, market_lines))
+            brief = generate_brief(anthropic_key, flags, market_lines)
+            st.markdown(brief.replace("$", "\\$"))
         except Exception as e:
             st.error(f"Brief failed: {e}")
 
