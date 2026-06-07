@@ -124,7 +124,7 @@ def liquidity_stress(rrp: pd.Series, tga: pd.Series, fetched_at: str,
                      rrp_floor: float = 200.0, tga_rise: float = 100.0) -> RegimeFlag:
     """ACTIVE when RRP < floor AND TGA has risen > tga_rise over ~30 days.
     Inputs expected in $ billions (RRPONTSYD, WTREGEN)."""
-    rule = f"RRP < ${rrp_floor:.0f}B AND TGA +>${tga_rise:.0f}B in 30d"
+    rule = f"RRP < {rrp_floor:.0f}bn AND TGA up > {tga_rise:.0f}bn in 30d"
     if _clean(rrp).empty or _clean(tga).empty:
         return RegimeFlag("Liquidity Stress", "UNKNOWN", rule,
                           inputs=[_prov("RRPONTSYD", rrp, fetched_at), _prov("WTREGEN", tga, fetched_at)])
