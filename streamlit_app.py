@@ -1,14 +1,10 @@
 """
-MacroFlow Terminal — v1.2
-FRED-powered dashboard: regimes, yields, net liquidity, AI brief, data lineage.
+MacroFlow Terminal — v1.3
+FRED-powered: regimes, yields, net liquidity, historical base rates, AI brief, lineage.
 
-Deploy:
-  Files: streamlit_app.py + regime_engine.py + ai_brief.py + requirements.txt
-  Secrets (Settings -> Secrets):
-      FRED_API_KEY = "your_fred_key"
-      ANTHROPIC_API_KEY = "your_anthropic_key"   # only needed for the AI brief
-
-Units that bite: WALCL and WTREGEN are MILLIONS; RRPONTSYD is BILLIONS.
+Files: streamlit_app.py + regime_engine.py + ai_brief.py + backtest_engine.py + requirements.txt
+Secrets:  FRED_API_KEY = "..."   and (optional)  ANTHROPIC_API_KEY = "..."
+Units: WALCL & WTREGEN are MILLIONS; RRPONTSYD is BILLIONS.
 """
 
 from datetime import datetime, timezone
@@ -20,19 +16,14 @@ import streamlit as st
 
 from regime_engine import compute_regimes, active_regime_line
 from ai_brief import generate_brief
+from backtest_engine import backtest_regime
 
 FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 SERIES = {
-    "DGS2":      "2Y Treasury Yield",
-    "DGS10":     "10Y Treasury Yield",
-    "DGS30":     "30Y Treasury Yield",
-    "WALCL":     "Fed Total Assets",          # millions
-    "WTREGEN":   "Treasury General Account",  # millions
-    "RRPONTSYD": "Overnight Reverse Repo",    # billions
-    "T10Y2Y":    "10y-2y Spread",
-    "VIXCLS":    "VIX",
-    "CPIAUCSL":  "CPI (All Urban)",
+    "DGS2": "2Y Treasury Yield", "DGS10": "10Y Treasury Yield", "DGS30": "30Y Treasury Yield",
+    "WALCL": "Fed Total Assets", "WTREGEN": "Treasury General Account", "RRPONTSYD": "Overnight Reverse Repo",
+    "T10Y2Y": "10y-2y Spread", "VIXCLS": "VIX", "CPIAUCSL": "CPI (All Urban)",
 }
 
 
@@ -41,13 +32,12 @@ SERIES = {
 # --------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600)
-def get_fred_series(series_id: str, api_key: str) -> pd.Series:
+def get_fred_series(series_id: str, api_key: str, observation_start: str = "2018-01-01") -> pd.Series:
     params = {"series_id": series_id, "api_key": api_key,
-              "file_type": "json", "observation_start": "2018-01-01"}
+              "file_type": "json", "observation_start": observation_start}
     r = requests.get(FRED_URL, params=params, timeout=30)
     r.raise_for_status()
     obs = r.json().get("observations", [])
-
     dates, values = [], []
     for o in obs:
         v = o.get("value", ".")
@@ -55,7 +45,6 @@ def get_fred_series(series_id: str, api_key: str) -> pd.Series:
             continue
         dates.append(pd.to_datetime(o["date"]))
         values.append(float(v))
-
     s = pd.Series(values, index=pd.DatetimeIndex(dates), name=series_id).sort_index()
     s.attrs = {"source": "FRED", "series_id": series_id,
                "as_of": s.index[-1].strftime("%Y-%m-%d") if len(s) else "—",
@@ -71,11 +60,9 @@ def load_all(api_key: str) -> dict[str, pd.Series]:
 # Presentation helpers
 # --------------------------------------------------------------------------
 
-STATUS_COLOR = {
-    "ACTIVE": "red", "HOT": "red", "RISK-OFF": "red",
-    "COLD": "blue", "RISK-ON": "green",
-    "NEUTRAL": "gray", "INACTIVE": "gray", "UNKNOWN": "gray",
-}
+STATUS_COLOR = {"ACTIVE": "red", "HOT": "red", "RISK-OFF": "red",
+                "COLD": "blue", "RISK-ON": "green",
+                "NEUTRAL": "gray", "INACTIVE": "gray", "UNKNOWN": "gray"}
 
 def regime_detail(f) -> str:
     c = f.computed
@@ -89,7 +76,6 @@ def regime_detail(f) -> str:
     if f.name == "Risk Regime":
         return f"VIX {c.get('vix_latest', 0):.1f}"
     return ""
-
 
 def line_chart(s: pd.Series, y_title: str, days: int = 365):
     s = s.dropna()
@@ -158,7 +144,6 @@ tga_m = data["WTREGEN"].dropna()
 rrp_m = data["RRPONTSYD"].dropna() * 1000
 net = (walcl - tga_m.reindex(walcl.index, method="ffill")
              - rrp_m.reindex(walcl.index, method="ffill")).dropna()
-
 latest_m = delta_b = None
 if len(net):
     latest_m = net.iloc[-1]
@@ -167,6 +152,35 @@ if len(net):
     delta_b = (latest_m - prior_m) / 1000
     st.metric("Net Liquidity", f"${latest_m / 1e6:,.2f}T", f"{delta_b:+,.0f}B (30d)")
     line_chart(net / 1e6, "Net liquidity (USD trn)")
+
+st.divider()
+
+# --- Historical base rates (the honest probabilities) ---
+st.subheader("Historical Base Rates")
+st.caption("Computed from history, not predicted — what risk assets did in each inflation regime.")
+base_rate_line = None
+ndq_long = None
+try:
+    cpi_long = get_fred_series("CPIAUCSL", api_key, "1971-01-01")
+    ndq_long = get_fred_series("NASDAQCOM", api_key, "1971-01-01")
+    res = backtest_regime(cpi_long, ndq_long, horizon_months=3, lag_months=1)
+    hot, notv, H = res["HOT"], res["NOT HOT"], res["horizon_months"]
+    b1, b2 = st.columns(2)
+    b1.metric(f"Inflation HOT → NASDAQ next {H}mo (avg)",
+              f"{hot['mean_pct']}%" if hot['mean_pct'] is not None else "—")
+    b1.caption(f"positive {hot['pct_positive']}% of the time · n={hot['n']} months")
+    b2.metric(f"Not HOT → NASDAQ next {H}mo (avg)",
+              f"{notv['mean_pct']}%" if notv['mean_pct'] is not None else "—")
+    b2.caption(f"positive {notv['pct_positive']}% of the time · n={notv['n']} months")
+    st.caption("Source: FRED CPIAUCSL (3-mo annualized, 1-mo publication lag) + NASDAQCOM, "
+               "monthly since 1971. Revised data; ALFRED true-vintage is the v2 upgrade.")
+    if hot["mean_pct"] is not None:
+        base_rate_line = (f"Historical base rate: when inflation was HOT (n={hot['n']} months since 1971), "
+                          f"NASDAQ's next-{H}mo return averaged {hot['mean_pct']}% "
+                          f"(positive {hot['pct_positive']}%), vs {notv['mean_pct']}% "
+                          f"(positive {notv['pct_positive']}%) when not HOT.")
+except Exception as e:
+    st.warning(f"Base rates unavailable: {e}")
 
 st.divider()
 
@@ -182,6 +196,8 @@ elif st.button("Generate brief"):
             f"Yields: 2Y {latest('DGS2'):.2f}%, 10Y {latest('DGS10'):.2f}%, 30Y {latest('DGS30'):.2f}%")
     if latest_m is not None:
         market_lines.append(f"Net liquidity: ${latest_m/1e6:,.2f}T (30d {delta_b:+,.0f}B)")
+    if base_rate_line:
+        market_lines.append(base_rate_line)
     with st.spinner("Narrating the facts…"):
         try:
             brief = generate_brief(anthropic_key, flags, market_lines)
@@ -197,4 +213,9 @@ rows = [{"Metric": label, "Source": data[sid].attrs.get("source", "—"),
          "Series ID": sid, "As Of": data[sid].attrs.get("as_of", "—"),
          "Fetched (UTC)": data[sid].attrs.get("fetched_at", "—")}
         for sid, label in SERIES.items()]
+if ndq_long is not None:
+    a = ndq_long.attrs
+    rows.append({"Metric": "NASDAQ Composite (backtest)", "Source": a.get("source", "—"),
+                 "Series ID": "NASDAQCOM", "As Of": a.get("as_of", "—"),
+                 "Fetched (UTC)": a.get("fetched_at", "—")})
 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
